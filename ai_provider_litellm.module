@@ -1,0 +1,150 @@
+<?php
+
+/**
+ * @file
+ * Provides LiteLLM integration for the AI module.
+ * 
+ * LiteLLM is a unified interface that allows you to call 100+ LLM APIs
+ * using a shared chat-completions-compatible format. This includes AWS Bedrock, Azure OpenAI,
+ * Google Vertex AI, Anthropic, Cohere, Replicate, and many more.
+ * 
+ * @see https://litellm.ai/
+ */
+
+/**
+ * Implements hook_autoload_info().
+ */
+function ai_provider_litellm_autoload_info() {
+  return [
+    'AILiteLLMAdapter' => 'includes/AILiteLLMAdapter.php',
+  ];
+}
+
+/**
+ * Implements hook_ai_provider_info().
+ */
+function ai_provider_litellm_ai_provider_info() {
+  return [
+    'litellm' => [
+      'label' => t('LiteLLM (100+ Providers - Universal)'),
+      'description' => t('Connect to 100+ LLM providers including AWS Bedrock, Azure OpenAI, Google Vertex AI, Anthropic, and more through a unified interface.'),
+      'class' => 'AILiteLLMAdapter',
+      'website' => 'https://litellm.ai/',
+      'models_url' => 'https://docs.litellm.ai/docs/providers',
+    ],
+  ];
+}
+
+/**
+ * Implements hook_config_info().
+ */
+function ai_provider_litellm_config_info() {
+  return [
+    'ai_provider_litellm.settings' => [
+      'label' => t('LiteLLM Settings'),
+      'group' => t('Configuration'),
+    ],
+  ];
+}
+
+/**
+ * Implements hook_ai_provider_settings_alter().
+ * 
+ * Adds LiteLLM-specific settings to the main AI settings form.
+ */
+function ai_provider_litellm_ai_provider_settings_alter(&$settings, $context) {
+  if ($context['provider'] !== 'litellm') {
+    return;
+  }
+
+  $default_base_url = config_get('ai_provider_litellm.settings', 'base_url') ?: 'http://localhost:4000';
+
+  $settings['litellm_info'] = [
+    '#type' => 'markup',
+    '#markup' => '<div class="messages info">' . 
+      t('<strong>LiteLLM Configuration</strong><br>LiteLLM provides a unified API-compatible interface to 100+ LLM providers. You can run it locally or use a remote instance.') .
+      '</div>',
+    '#weight' => -10,
+  ];
+
+  $settings['litellm_base_url'] = [
+    '#type' => 'textfield',
+    '#title' => t('LiteLLM Server URL'),
+    '#default_value' => $default_base_url,
+    '#description' => t('The base URL of your LiteLLM proxy server. Default is http://localhost:4000 for local installations.'),
+    '#required' => FALSE,
+    '#weight' => 0,
+  ];
+
+  $settings['litellm_examples'] = [
+    '#type' => 'fieldset',
+    '#title' => t('Example Configurations'),
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+    '#weight' => 5,
+  ];
+
+  $settings['litellm_examples']['content'] = [
+    '#type' => 'markup',
+    '#markup' => '
+      <h4>Option 1: LiteLLM Proxy (Recommended)</h4>
+      <p>Install and run LiteLLM proxy locally or on a server:</p>
+      <pre>pip install litellm[proxy]
+litellm --config config.yaml</pre>
+      <p><strong>Base URL:</strong> <code>http://localhost:4000</code></p>
+      <p><strong>API Key:</strong> Configure in LiteLLM or use "LITELLM_MASTER_KEY"</p>
+
+      <h4>Option 2: Direct Provider Connection</h4>
+      <p>Point directly to compatible provider endpoints:</p>
+      <ul>
+        <li><strong>AWS Bedrock:</strong> <code>https://bedrock-runtime.us-east-1.amazonaws.com</code></li>
+        <li><strong>Azure OpenAI:</strong> <code>https://YOUR-RESOURCE.ai.azure.com</code></li>
+        <li><strong>Together AI:</strong> <code>https://api.together.xyz/v1</code></li>
+        <li><strong>Anyscale:</strong> <code>https://api.endpoints.anyscale.com/v1</code></li>
+      </ul>
+
+      <h4>Supported Providers (via LiteLLM)</h4>
+      <ul>
+        <li><strong>Cloud:</strong> OpenAI, Anthropic, Cohere, AI21, Replicate</li>
+        <li><strong>AWS:</strong> Bedrock, SageMaker</li>
+        <li><strong>Azure:</strong> Azure OpenAI</li>
+        <li><strong>Google:</strong> Vertex AI, PaLM</li>
+        <li><strong>Open Source:</strong> HuggingFace, TogetherAI, Anyscale</li>
+        <li><strong>Local:</strong> Ollama, LocalAI, vLLM</li>
+      </ul>
+
+      <h4>Quick Start</h4>
+      <ol>
+        <li>Install LiteLLM: <code>pip install litellm[proxy]</code></li>
+        <li>Create config.yaml with your provider settings</li>
+        <li>Start proxy: <code>litellm --config config.yaml</code></li>
+        <li>Set Base URL above to your LiteLLM server</li>
+        <li>Set API Key to your LiteLLM master key (or leave as "dummy")</li>
+      </ol>
+
+      <p><strong>Resources:</strong></p>
+      <ul>
+        <li><a href="https://docs.litellm.ai/docs/" target="_blank">LiteLLM Documentation</a></li>
+        <li><a href="https://docs.litellm.ai/docs/providers" target="_blank">Supported Providers</a></li>
+        <li><a href="https://docs.litellm.ai/docs/proxy/quick_start" target="_blank">Proxy Quick Start</a></li>
+        <li><a href="https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-ai.html" target="_blank">AWS Bedrock OpenAI Compatibility</a></li>
+      </ul>
+    ',
+  ];
+
+  // Add custom submit handler
+  $context['form']['#submit'][] = 'ai_provider_litellm_settings_submit';
+}
+
+/**
+ * Custom submit handler to save LiteLLM settings.
+ */
+function ai_provider_litellm_settings_submit($form, &$form_state) {
+  if (isset($form_state['values']['litellm_base_url'])) {
+    $config = config('ai_provider_litellm.settings');
+    $config->set('base_url', $form_state['values']['litellm_base_url']);
+    $config->save();
+    
+    backdrop_set_message(t('LiteLLM server URL has been saved.'));
+  }
+}

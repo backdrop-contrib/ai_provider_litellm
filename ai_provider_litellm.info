@@ -1,0 +1,7 @@
+name = AI Provider LiteLLM
+description = LiteLLM provider for accessing hundreds of AI models through the AI module.
+backdrop = 1.x
+type = module
+package = AI
+
+dependencies[] = ai

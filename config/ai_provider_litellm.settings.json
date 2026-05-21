@@ -1,0 +1,4 @@
+{
+    "_config_name": "ai_provider_litellm.settings",
+    "base_url": "http://localhost:4000"
+}
