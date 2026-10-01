@@ -18,6 +18,12 @@ class AILiteLLMAdapter extends AIAdapterBase {
   /** @var string Base URL including /v1 suffix. */
   protected $baseUrl;
 
+  /** @var array|null Model metadata, indexed by public proxy alias. */
+  protected $modelMetadata;
+
+  /** @var array|null Catalog reused across capability lookups. */
+  protected $models;
+
   /**
    * Constructor.
    *
@@ -50,6 +56,9 @@ class AILiteLLMAdapter extends AIAdapterBase {
    * {@inheritdoc}
    */
   public function getModels(): array {
+    if ($this->models !== NULL) {
+      return $this->models;
+    }
     $models = [];
     try {
       $data = $this->makeRequest($this->baseUrl . '/models', [], [], 'GET', 10);
@@ -66,33 +75,50 @@ class AILiteLLMAdapter extends AIAdapterBase {
     catch (\Exception $e) {
       watchdog('ai_provider_litellm', 'Failed to fetch models: @error', ['@error' => $e->getMessage()], WATCHDOG_ERROR);
     }
-    return $models;
+    return $this->models = $models;
   }
 
   /**
    * {@inheritdoc}
    *
-   * LiteLLM proxies many providers, so capability detection is heuristic.
-   * Allow alter hooks for site-specific overrides.
+   * Proxy aliases do not describe capability. Use /model/info metadata instead.
    */
   public function getModelsByCapability($capability): array {
     $all_models = $this->getModels();
     $filtered = [];
+    $metadata = $this->getModelMetadata();
+    $capability = ai_normalize_capability_name($capability);
 
     foreach ($all_models as $id => $name) {
+      $info = $metadata[$id] ?? [];
+      $mode = $info['mode'] ?? '';
       $is_match = FALSE;
       switch ($capability) {
         case 'text':
-          $is_match = TRUE;
+          // Without /model/info metadata keep every alias selectable for chat,
+          // as before; manual capabilities can narrow the list.
+          $is_match = $metadata ? in_array($mode, ['chat', 'completion'], TRUE) : TRUE;
           break;
 
         case 'embedding':
         case 'embeddings':
-          $is_match = (bool) preg_match('/embed/i', $id);
+          $is_match = $mode === 'embedding';
           break;
 
         case 'vision':
-          $is_match = (bool) preg_match('/vision|gpt-4o|claude-3|gemini/i', $id);
+          $is_match = $mode === 'chat' && !empty($info['supports_vision']);
+          break;
+
+        case 'tool_calling':
+          $is_match = $mode === 'chat' && !empty($info['supports_function_calling']);
+          break;
+
+        case 'thinking':
+          $is_match = $mode === 'chat' && !empty($info['supports_reasoning']);
+          break;
+
+        case 'audio':
+          $is_match = $mode === 'chat' && !empty($info['supports_audio_input']);
           break;
 
         case 'image':
@@ -109,6 +135,45 @@ class AILiteLLMAdapter extends AIAdapterBase {
 
     backdrop_alter('ai_model_capabilities', $filtered, $capability, $this);
     return $filtered;
+  }
+
+  /**
+   * Fetch metadata without persisting proxy credentials from /model/info.
+   */
+  protected function getModelMetadata(): array {
+    if ($this->modelMetadata !== NULL) {
+      return $this->modelMetadata;
+    }
+    $cache_key = ai_models_cache_key('litellm', 'model_metadata', [$this->baseUrl, hash('sha256', $this->apiKey)]);
+    if ($cached = cache_get($cache_key, 'cache')) {
+      return $this->modelMetadata = $cached->data;
+    }
+    $metadata = [];
+    try {
+      $url = preg_replace('#/v1$#', '', $this->baseUrl) . '/model/info';
+      $data = $this->makeRequest($url, [], [], 'GET', 10);
+      foreach ($data['data'] ?? [] as $model) {
+        $id = $model['model_name'] ?? '';
+        if ($id !== '') {
+          $info = array_intersect_key((array) ($model['model_info'] ?? []), array_flip([
+            'mode', 'supports_vision', 'supports_function_calling',
+            'supports_reasoning', 'supports_audio_input',
+          ]));
+          // A public alias can route to several deployments. Keep only metadata
+          // all of them share, rather than promising a capability at random.
+          if (isset($metadata[$id])) {
+            $info = array_intersect_assoc($metadata[$id], $info);
+          }
+          $metadata[$id] = $info;
+        }
+      }
+    }
+    catch (\Exception $e) {
+      // Do not log the response body: some proxies return credential details.
+      watchdog('ai_provider_litellm', 'Model capability metadata is unavailable. Configure manual capabilities or allow access to /model/info.', [], WATCHDOG_WARNING);
+    }
+    cache_set($cache_key, $metadata, 'cache', REQUEST_TIME + ($metadata ? 21600 : 300));
+    return $this->modelMetadata = $metadata;
   }
 
   /**
@@ -203,7 +268,7 @@ class AILiteLLMAdapter extends AIAdapterBase {
    */
   public function embedding(string $input, string $model, bool $log = TRUE): array {
     $start_time = microtime(TRUE);
-    $result = $this->embeddings($model, [$input]);
+    $result = $this->embeddings($model, [$input], 'float', $log);
     if (!empty($result['data'][0]['embedding'])) {
       if (isset($this->api) && method_exists($this->api, 'recordLog')) {
         $duration = microtime(TRUE) - $start_time;
@@ -222,8 +287,12 @@ class AILiteLLMAdapter extends AIAdapterBase {
 
   /**
    * {@inheritdoc}
+   *
+   * @param bool $log
+   *   Passed through to the error logger. FALSE marks a capability probe, whose
+   *   expected failures must not reach watchdog.
    */
-  public function embeddings(string $model, array $inputs, string $response_format = 'float'): array {
+  public function embeddings(string $model, array $inputs, string $response_format = 'float', bool $log = TRUE): array {
     try {
       $results = [];
       foreach ($inputs as $index => $input) {
@@ -252,7 +321,7 @@ class AILiteLLMAdapter extends AIAdapterBase {
       ];
     }
     catch (\Exception $e) {
-      ai_log_embedding_error('ai_provider_litellm', $e->getMessage());
+      ai_log_embedding_error('ai_provider_litellm', $e->getMessage(), $log);
       throw $e;
     }
   }
